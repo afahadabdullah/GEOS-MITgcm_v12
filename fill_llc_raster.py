@@ -294,8 +294,9 @@ def main() -> int:
     ap.add_argument(
         "--max-distance",
         type=float,
-        default=32.0,
-        help="assign to ocean only within this many pixels; beyond it, reclassify to lake",
+        default=0.0,
+        help="assign to ocean only within this many pixels; beyond it, reclassify to lake "
+             "(0 = always reclassify, which keeps LLC cell areas consistent with the mitgrid)",
     )
     ap.add_argument("--max-radius", type=int, default=256, help="hard search limit in pixels")
     ap.add_argument("--report", default=None, help="write a decision report here")

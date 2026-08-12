@@ -60,11 +60,21 @@ LAND_OCEAN_VALUE=""
 LAND_LAKE_VALUE=""
 
 # Mismatched pixels within this many raster pixels of a wet LLC cell are
-# treated as sub-grid coastline slivers and assigned to it; further ones are
-# reclassified to lake.  A raster pixel is 1/120 degree (~0.9 km at the
-# equator) and an LLC270 cell spans roughly 40 pixels, so 32 keeps assignment
-# inside about one grid cell.
-MAX_OCEAN_DISTANCE=32
+# assigned to it; further ones are reclassified to lake.
+#
+# The default is 0 -- everything becomes lake -- because LLC cell areas in the
+# .til come from the mitgrid files, not from the raster.  Moving raster pixels
+# into a cell grows its exchange area while its declared area stays fixed, so
+# the surface fractions for that cell sum above 1.  Measured at distance 32:
+# 14679 pixels assigned, 48 cells affected, and a maximum surface fraction of
+# 1.93 against 1.0000070 for an untouched build.  Adjusting the .til areas
+# instead would desynchronise them from MIT's own rA and break flux
+# conservation, so the raster assignment is the thing that has to give.
+#
+# Lake has no such constraint: every lake record shares one global tile, so the
+# same 12300 km^2 is a sub-percent perturbation there.  This also reproduces
+# what the GEOS v11.7 LLC270 tile file does with the same water.
+MAX_OCEAN_DISTANCE=0
 
 usage() {
     cat <<EOF
@@ -413,6 +423,58 @@ validate_tile() {
                 if (cells != expected_cells || bad != 0) {
                     print "Atmospheric exchange coverage validation failed" > "/dev/stderr"
                     print "Expected cells:", expected_cells, "found:", cells, "bad sums:", bad+0 > "/dev/stderr"
+                    exit 1
+                }
+            }
+        ' "$tile"
+
+        # The surface-side check, and it is deliberately one-sided.
+        #
+        # Fractions over a surface tile summing BELOW 1 are normal: a tile only
+        # partly of its own type -- a coastal LLC cell that is mostly land --
+        # exchanges only over the covered fraction.  The shipped v11.7 LLC270
+        # file has 31961 such tiles, with exactly the same extremum seen here
+        # (max shortfall 0.999459, worst sum 0.000540689), so a two-sided test
+        # rejects known-good geometry.
+        #
+        # Overshoot is the real defect.  It means a tile carries more exchange
+        # area than its declared size accounts for, which is what happens when
+        # raster pixels are moved into an LLC cell whose .til area comes from
+        # the mitgrid and cannot follow.  That build showed surface fractions
+        # up to 1.93.
+        note "Checking that no surface tile carries more exchange area than it declares"
+        awk '
+            NR > 8 {sum[$12] += $11; type[$12] = $1}
+            END {
+                # Calibrated against both shipped tile files rather than to an
+                # ideal.  The v11.7 LLC270 file overshoots on its single global
+                # lake tile by 0.004205, and the v12 MOM6 file overshoots on
+                # nine land catchments by 7.0271e-06 -- the same nine that show
+                # up in the per-record fraction check.  A 1e-6 bound rejects
+                # both.  5e-3 accepts them while still catching the failure
+                # this check exists for: raster pixels assigned to LLC cells
+                # whose declared area cannot follow drove sums to 1.93.
+                tolerance = 5.0e-3
+                for (key in sum) {
+                    tiles++
+                    excess = sum[key] - 1.0
+                    if (excess > tolerance) {
+                        over++
+                        over_type[type[key]]++
+                        if (excess > max_over) {max_over = excess; worst = key}
+                    } else if (excess < -tolerance) {
+                        partial++
+                    }
+                }
+                printf "  surface tiles: %d\n", tiles
+                printf "  partially covered (sum < 1, expected): %d\n", partial + 0
+                printf "  maximum overshoot: %.6g\n", max_over + 0
+                if (over) {
+                    printf "Surface tiles carrying excess exchange area: %d\n", over > "/dev/stderr"
+                    for (t in over_type)
+                        printf "  surface type %s: %d tiles\n", t, over_type[t] > "/dev/stderr"
+                    printf "  worst tile: %s (sum %.12f)\n", worst, sum[worst] > "/dev/stderr"
+                    print "  raster pixels were likely assigned to tiles whose declared area did not change" > "/dev/stderr"
                     exit 1
                 }
             }

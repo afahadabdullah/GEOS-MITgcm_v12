@@ -51,6 +51,13 @@ REPAIR_RASTER=1
 PYTHON_BIN=${PYTHON_BIN:-python3}
 RASTER_FILLER=""
 
+# Value marking ocean in Pfafstetter.rst.  Left empty it is derived from the
+# Pfafstetter.til tile count (ocean = N+1).  Only pixels that are RASTERUNDEF in
+# the LLC raster AND ocean in the land raster are repaired; the ~183M
+# RASTERUNDEF pixels covering the land surface are left alone.  Confirm with
+#   fill_llc_raster.py --inspect --llc-raster ... --land-raster ...
+LAND_OCEAN_VALUE=""
+
 usage() {
     cat <<EOF
 Usage:
@@ -88,6 +95,7 @@ Options:
   --fraction-tol X       Exchange fraction upper bound (default: $FRACTION_TOL)
   --skip-raster-repair   Do not fill undefined pixels in the LLC raster
   --raster-filler FILE   Path to fill_llc_raster.py (default: next to this script)
+  --land-ocean-value N   Pfafstetter.rst ocean marker (default: tile count + 1)
   -h, --help             Show this help
 
 Example:
@@ -492,6 +500,11 @@ while [[ $# -gt 0 ]]; do
             REPAIR_RASTER=0
             shift
             ;;
+        --land-ocean-value)
+            [[ $# -ge 2 ]] || die "--land-ocean-value requires a value"
+            LAND_OCEAN_VALUE=$2
+            shift 2
+            ;;
         --raster-filler)
             [[ $# -ge 2 ]] || die "--raster-filler requires a value"
             RASTER_FILLER=$2
@@ -712,14 +725,30 @@ if [[ "$REPAIR_RASTER" == "1" ]]; then
     require_file "$RASTER_FILLER"
     command -v "$PYTHON_BIN" >/dev/null 2>&1 || \
         die "$PYTHON_BIN not found; set PYTHON_BIN or pass --skip-raster-repair"
-    note "Repairing undefined pixels in the LLC270 raster"
+
+    # Pfafstetter.til ends with three placeholder tiles -- ocean, lake and land
+    # ice -- after the land catchments, and Pfafstetter.rst stores each pixel's
+    # record number.  The ocean placeholder is NOT the last record, so derive it
+    # by finding the type-0 record rather than assuming a position: for the v13
+    # C180 bundle that is 289836, with lake 289837 and land ice 289838.
+    if [[ -z "$LAND_OCEAN_VALUE" ]]; then
+        LAND_OCEAN_VALUE=$(awk 'NR > 5 && $1 == 0 {print NR - 5; exit}' \
+            "$RUN_DIR/til/Pfafstetter.til")
+        [[ "$LAND_OCEAN_VALUE" =~ ^[0-9]+$ ]] || \
+            die "Could not locate the ocean placeholder record in $RUN_DIR/til/Pfafstetter.til"
+        note "Derived Pfafstetter ocean marker: $LAND_OCEAN_VALUE"
+    fi
+
+    note "Repairing LLC/Pfafstetter coastline mismatches"
     "$PYTHON_BIN" "$RASTER_FILLER" \
-        --input "$raw_llc_rst" \
+        --llc-raster "$raw_llc_rst" \
+        --land-raster "$RUN_DIR/rst/Pfafstetter.rst" \
         --output "$RUN_DIR/rst/${raw_llc_base}.rst" \
         --nx "$EXPECTED_RASTER_NX" \
         --ny "$EXPECTED_RASTER_NY" \
         --valid-min 1 \
         --valid-max "$(( EXPECTED_OCN_IM * EXPECTED_OCN_JM ))" \
+        --land-ocean "$LAND_OCEAN_VALUE" \
         --report "$RUN_DIR/log/llc270_raster_fill.txt" \
         2>&1 | tee "$RUN_DIR/log/llc270_raster_fill.log"
     [[ "${PIPESTATUS[0]}" == "0" ]] || die "LLC raster repair failed; see $RUN_DIR/log/llc270_raster_fill.log"

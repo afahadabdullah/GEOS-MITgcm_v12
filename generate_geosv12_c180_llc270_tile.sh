@@ -57,6 +57,14 @@ RASTER_FILLER=""
 # RASTERUNDEF pixels covering the land surface are left alone.  Confirm with
 #   fill_llc_raster.py --inspect --llc-raster ... --land-raster ...
 LAND_OCEAN_VALUE=""
+LAND_LAKE_VALUE=""
+
+# Mismatched pixels within this many raster pixels of a wet LLC cell are
+# treated as sub-grid coastline slivers and assigned to it; further ones are
+# reclassified to lake.  A raster pixel is 1/120 degree (~0.9 km at the
+# equator) and an LLC270 cell spans roughly 40 pixels, so 32 keeps assignment
+# inside about one grid cell.
+MAX_OCEAN_DISTANCE=32
 
 usage() {
     cat <<EOF
@@ -95,7 +103,11 @@ Options:
   --fraction-tol X       Exchange fraction upper bound (default: $FRACTION_TOL)
   --skip-raster-repair   Do not fill undefined pixels in the LLC raster
   --raster-filler FILE   Path to fill_llc_raster.py (default: next to this script)
-  --land-ocean-value N   Pfafstetter.rst ocean marker (default: tile count + 1)
+  --land-ocean-value N   Pfafstetter.rst ocean marker (default: from the .til)
+  --land-lake-value N    Pfafstetter.rst lake marker (default: from the .til)
+  --max-ocean-distance N Assign a mismatched pixel to the nearest wet LLC cell
+                         within N raster pixels; beyond that make it lake
+                         (default: $MAX_OCEAN_DISTANCE)
   -h, --help             Show this help
 
 Example:
@@ -505,6 +517,16 @@ while [[ $# -gt 0 ]]; do
             LAND_OCEAN_VALUE=$2
             shift 2
             ;;
+        --land-lake-value)
+            [[ $# -ge 2 ]] || die "--land-lake-value requires a value"
+            LAND_LAKE_VALUE=$2
+            shift 2
+            ;;
+        --max-ocean-distance)
+            [[ $# -ge 2 ]] || die "--max-ocean-distance requires a value"
+            MAX_OCEAN_DISTANCE=$2
+            shift 2
+            ;;
         --raster-filler)
             [[ $# -ge 2 ]] || die "--raster-filler requires a value"
             RASTER_FILLER=$2
@@ -736,23 +758,46 @@ if [[ "$REPAIR_RASTER" == "1" ]]; then
             "$RUN_DIR/til/Pfafstetter.til")
         [[ "$LAND_OCEAN_VALUE" =~ ^[0-9]+$ ]] || \
             die "Could not locate the ocean placeholder record in $RUN_DIR/til/Pfafstetter.til"
-        note "Derived Pfafstetter ocean marker: $LAND_OCEAN_VALUE"
     fi
+    if [[ -z "$LAND_LAKE_VALUE" ]]; then
+        LAND_LAKE_VALUE=$(awk 'NR > 5 && $1 == 19 {print NR - 5; exit}' \
+            "$RUN_DIR/til/Pfafstetter.til")
+        [[ "$LAND_LAKE_VALUE" =~ ^[0-9]+$ ]] || \
+            die "Could not locate the lake placeholder record in $RUN_DIR/til/Pfafstetter.til"
+    fi
+    note "Pfafstetter placeholders: ocean=$LAND_OCEAN_VALUE lake=$LAND_LAKE_VALUE"
 
-    note "Repairing LLC/Pfafstetter coastline mismatches"
+    # Mismatched pixels are resolved by distance rather than forced into the
+    # ocean.  Within MAX_OCEAN_DISTANCE a pixel is a sub-grid coastline sliver
+    # and belongs to the nearest wet LLC cell; beyond it -- the Meghna estuary
+    # sits over 100 pixels from any wet cell -- assigning it to open ocean would
+    # inject a whole cell's worth of estuarine freshwater in the wrong place, so
+    # it becomes lake instead, which is how the GEOS v11.7 LLC270 tile file
+    # treats the same water.  Both rasters are rewritten into the run directory.
+    note "Reconciling the land mask with the LLC270 ocean domain"
     "$PYTHON_BIN" "$RASTER_FILLER" \
         --llc-raster "$raw_llc_rst" \
         --land-raster "$RUN_DIR/rst/Pfafstetter.rst" \
-        --output "$RUN_DIR/rst/${raw_llc_base}.rst" \
+        --llc-output "$RUN_DIR/rst/${raw_llc_base}.rst" \
+        --land-output "$RUN_DIR/rst/Pfafstetter.repaired.rst" \
         --nx "$EXPECTED_RASTER_NX" \
         --ny "$EXPECTED_RASTER_NY" \
         --valid-min 1 \
         --valid-max "$(( EXPECTED_OCN_IM * EXPECTED_OCN_JM ))" \
         --land-ocean "$LAND_OCEAN_VALUE" \
+        --land-lake "$LAND_LAKE_VALUE" \
+        --max-distance "$MAX_OCEAN_DISTANCE" \
         --report "$RUN_DIR/log/llc270_raster_fill.txt" \
         2>&1 | tee "$RUN_DIR/log/llc270_raster_fill.log"
-    [[ "${PIPESTATUS[0]}" == "0" ]] || die "LLC raster repair failed; see $RUN_DIR/log/llc270_raster_fill.log"
+    [[ "${PIPESTATUS[0]}" == "0" ]] || die "Land/LLC reconciliation failed; see $RUN_DIR/log/llc270_raster_fill.log"
     require_file "$RUN_DIR/rst/${raw_llc_base}.rst"
+    require_file "$RUN_DIR/rst/Pfafstetter.repaired.rst"
+
+    # CombineRasters reads rst/Pfafstetter.rst, so put the reconciled copy
+    # there.  It replaces a symlink to the read-only source bundle; the
+    # original is never touched.
+    rm -f "$RUN_DIR/rst/Pfafstetter.rst"
+    mv "$RUN_DIR/rst/Pfafstetter.repaired.rst" "$RUN_DIR/rst/Pfafstetter.rst"
 elif [[ "$raw_llc_rst" != "$RUN_DIR/rst/${raw_llc_base}.rst" ]]; then
     ln -s "$raw_llc_rst" "$RUN_DIR/rst/${raw_llc_base}.rst"
 fi

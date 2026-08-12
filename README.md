@@ -14,7 +14,16 @@ This repository provides a bash script and supporting utilities to construct an 
 
 The v12 land mask was built to be consistent with the MOM6 tripolar ocean grid (¼° resolution), not LLC270 (⅓° resolution). Where GEOS calls water but LLC270 has no ocean cell—semi-enclosed estuaries, fjords, gulfs behind blanked tiles—`mkMITAquaRaster.x` leaves raster pixels undefined. `CombineRasters.x` cannot represent "water with no ocean cell," so it emits spurious ocean exchange records with compact index (0, 0).
 
-**Solution**: `fill_llc_raster.py` reads both rasters together, identifies the intersection (LLC undefined AND land says ocean—typically ~30,000 pixels), and assigns each to its nearest valid LLC ocean index via nearest-neighbour search. This allows `CombineRasters` to derive every area and fraction consistently, eliminating the degenerate records.
+**Solution**: `fill_llc_raster.py` reads both rasters together and identifies the intersection — LLC undefined AND land says ocean, typically ~30,000 pixels. Each mismatched pixel is then resolved **by distance**, because not all of them should become ocean:
+
+| Distance to nearest wet LLC cell | Treatment |
+|---|---|
+| within `--max-distance` (default 32 px ≈ 30 km) | assign that LLC compact index — the pixel is a sub-grid coastline sliver belonging to that cell |
+| beyond it | reclassify to **lake** in the land raster |
+
+The second case matters. Pixels in the Meghna estuary sit more than 100 pixels from any wet LLC cell, and forcing them into the nearest ocean cell would inject a whole grid cell's worth of estuarine freshwater into open ocean. Measured on a real run, blanket nearest-ocean assignment put 2,867 pixels (~1,175 km²) onto a single ~1,400 km² LLC cell. The established GEOS v11.7 LLC270 tile file treats the same water as lake, and this reproduces that.
+
+Both repaired rasters are written to the run directory, and `CombineRasters` then derives every area and fraction itself — no post-hoc renormalization of the tile file.
 
 ## Files
 
@@ -24,11 +33,12 @@ The v12 land mask was built to be consistent with the MOM6 tripolar ocean grid (
   - Auto-derives LLC ocean marker from `Pfafstetter.til` header
   - Calls `fill_llc_raster.py` to repair coastline mismatches
   
-- **`fill_llc_raster.py`** — Raster repair utility
-  - Scans LLC and land rasters to locate pixels where LLC is undefined but land says ocean
-  - Fills each target with the nearest valid LLC ocean index (adaptive-radius search)
-  - Supports `--inspect` mode to preview repairs without writing
-  - Progress reporting and per-cell gain statistics
+- **`fill_llc_raster.py`** — Land/ocean mask reconciliation
+  - Scans LLC and land rasters together to locate mask mismatches
+  - Resolves each by distance: nearby pixels join an LLC cell, distant ones become lake
+  - Writes both a repaired LLC raster and a repaired land raster
+  - `--inspect` for a cheap scan, `--dry-run` for a full decision pass without writing
+  - Refuses to act on more than `--max-fill-fraction` of the raster (default 1%)
   
 - **`run_tile_nccs.sh`** — SLURM batch job template for NCCS Discover
   - Pre-configured paths and environment
@@ -96,8 +106,19 @@ python3 fill_llc_raster.py --inspect \
 
 Output includes:
 - Number of undefined pixels in the LLC raster (typically 18–20% = the land surface)
-- Breakdown of land raster values where LLC is undefined
-- Estimated repair target count
+- Exact breakdown of land raster values where LLC is undefined
+- Mask mismatch count
+
+To see how those mismatches would be split between ocean assignment and lake reclassification without writing anything, use `--dry-run` instead — it runs the full nearest-neighbour pass and reports a distance histogram:
+
+```bash
+python3 fill_llc_raster.py --dry-run \
+    --llc-raster  raw_LLC270.rst \
+    --land-raster Pfafstetter.rst \
+    --valid-max 691200 \
+    --land-ocean 289836 --land-lake 289837 \
+    --report decisions.txt
+```
 
 ## Key Options
 
@@ -113,6 +134,9 @@ Output includes:
 | `--work-root` | (required) | Parent directory for work subdirectory |
 | `--output` | (required) | Output `tile.data` path (must not exist) |
 | `--raster-filler` | `./fill_llc_raster.py` | Path to repair script |
+| `--max-ocean-distance` | `32` | Pixel radius within which a mismatch joins an LLC cell |
+| `--land-ocean-value` | (from the `.til`) | Ocean placeholder index |
+| `--land-lake-value` | (from the `.til`) | Lake placeholder index |
 | `--skip-raster-repair` | (disabled) | Skip the coastline mismatch repair |
 | `--skip-deep-validation` | (disabled) | Skip atmosphere fraction-conservation check |
 | `--fraction-tol` | `1.0001` | Exchange fraction upper bound (accounts for ASCII round-off) |
@@ -123,15 +147,28 @@ Output includes:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--llc-raster` | (required) | Input LLC raster from `mkMITAquaRaster.x` |
-| `--land-raster` | (required) | Pfafstetter raster (unless `--force`) |
-| `--output` | (required) | Repaired raster output |
+| `--land-raster` | (required) | Input `Pfafstetter.rst` |
+| `--llc-output` | (required) | Repaired LLC raster |
+| `--land-output` | (required) | Repaired land raster |
+| `--land-ocean` | (required) | Ocean placeholder index in the land raster |
+| `--land-lake` | (required if any reclassification) | Lake placeholder index |
+| `--max-distance` | `32` | Assign to an LLC cell within this many pixels; beyond it, make lake |
 | `--valid-min` | `1` | Lowest usable compact index |
 | `--valid-max` | `0` | Highest usable compact index (0 = none) |
-| `--land-ocean` | (auto-derive) | Value marking ocean in land raster |
-| `--inspect` | (disabled) | Report and exit without writing |
-| `--max-fill-fraction` | `0.01` | Refuse to fill >1% of raster (safety check) |
-| `--force` | (disabled) | Permit filling without land raster / past limit |
-| `--report` | (none) | Write per-cell gain statistics to file |
+| `--max-radius` | `256` | Hard search limit in pixels |
+| `--inspect` | (disabled) | Cheap scan of both rasters, then exit |
+| `--dry-run` | (disabled) | Full decision pass, write nothing |
+| `--max-fill-fraction` | `0.01` | Refuse to act on more than this fraction of the raster |
+| `--report` | (none) | Write decision and distance statistics to file |
+
+The placeholder indices are record positions in `Pfafstetter.til`, found by type:
+
+```bash
+awk 'NR > 5 && $1 ==  0 {print NR - 5; exit}' Pfafstetter.til   # ocean
+awk 'NR > 5 && $1 == 19 {print NR - 5; exit}' Pfafstetter.til   # lake
+```
+
+For the v13 `CF0180x6C_M6TP1440x1080` bundle these are 289836 and 289837. The main script derives both automatically.
 
 ## Output
 
@@ -213,7 +250,15 @@ grep "Invalid merged" $WORK_ROOT/c180_llc270.*/log/llc270_plus_v12_land.log
 
 ### Validation errors in fraction or ocean indices
 
-Check `--fraction-tol` — the production MOM6 tile carries fractions up to 1.0000070271. The default 1.0001 should pass. Also verify the repair ran and the work log shows `filled N pixels`.
+Check `--fraction-tol` — the production MOM6 tile carries fractions up to 1.0000070271. The default 1.0001 should pass. Also verify the reconciliation ran and the log shows both an `assigned to a nearby LLC cell` and a `reclassified to lake` count.
+
+### "N pixels are further than M px from any wet LLC cell"
+
+Expected for the Meghna estuary, Río de la Plata, and the Kara Sea gulfs. They are reclassified to lake automatically once `--land-lake` is supplied; the main script derives it. Raise `--max-ocean-distance` only if you actually want that water in the MIT ocean domain, and check the resulting `largest gain` figure — more than ~3,400 pixels on one cell means it absorbed more area than a whole LLC270 cell.
+
+### Lake and ocean counts differ from the reference tile
+
+Expected, and informative. The v11.7 LLC270 reference has 686,448 land / 33,287 lake / 6,904 land ice, because it was built on v11.7 land geometry. A correct v12 build matches the **v12 MOM6** file instead: 684,752 land / 32,725 lake / 6,836 land ice, plus whatever pixels the reconciliation moved into lake.
 
 ## References
 

@@ -1,52 +1,62 @@
 #!/usr/bin/env python3
-"""Repair LLC/Pfafstetter coastline mismatches in a GEOS raster pair.
+"""Reconcile the GEOS land mask with the MITgcm LLC ocean domain.
 
-Why this exists
----------------
-mkMITAquaRaster.x writes the LLC compact index of the ocean tile covering each
-43200x21600 raster pixel, and writes RASTERUNDEF (-999) everywhere the LLC
-ocean domain has no cell.  That is the normal, correct state for roughly 20% of
-the raster -- the entire land surface.  CombineRasters.x resolves those pixels
-from the Pfafstetter land raster, which is exactly what the second positional
-argument is for.
+The problem
+-----------
+mkMITAquaRaster.x writes the LLC compact index of the ocean cell covering each
+43200x21600 raster pixel, and RASTERUNDEF (-999) everywhere the LLC domain has
+no wet cell.  That is normal for ~20% of the raster: the land surface.
+CombineRasters.x resolves those pixels from the Pfafstetter land raster.
 
-The defect is narrower.  Where the GEOS land mask calls a pixel *water* but the
-LLC raster is RASTERUNDEF there, CombineRasters has no ocean cell to reference
-and no land catchment either.  It indexes the LLC table with -999, emits a
-single degenerate sentinel surface tile (zero area, zero indices, uninitialised
-latitude) at the land/ocean block boundary, and attributes every such pixel to
-it.  Those become ocean exchange records carrying compact index (0,0) in the
-final tile.data.
+The defect is narrower.  The GEOS v12 land mask was built against the MOM6
+tripolar ocean grid, which resolves estuaries and fjords that the coarser LLC270
+closes off.  Where the land mask says *ocean* but the LLC raster is RASTERUNDEF,
+CombineRasters has neither an ocean cell nor a land catchment to reference.  It
+falls back on the Pfafstetter ocean placeholder tile -- a zero-area record with
+zero indices -- and every such pixel is attributed to it, producing ocean
+exchange records carrying compact index (0,0) in the final tile.data.
 
-This tool fills ONLY that intersection: pixels that are RASTERUNDEF in the LLC
-raster *and* ocean in the land raster.  Each is assigned the compact index of
-its nearest valid LLC neighbour, so CombineRasters sees a consistent pair,
-derives every area and fraction itself, and no post-hoc renormalisation of the
-tile file is required.
+The policy
+----------
+Not every mismatched pixel should become ocean.  A pixel a few kilometres from a
+wet LLC cell is a sub-grid coastline sliver and belongs to that cell.  A pixel
+deep inside the Meghna estuary or the Rio de la Plata is more than 100 km from
+any wet LLC cell; assigning it to the nearest one would dump a whole grid cell's
+worth of estuarine freshwater into open ocean.  The established GEOS v11.7
+LLC270 tile file treats that water as lake, not ocean.
 
-CRITICAL: running without --land-raster would target all 183 million
-RASTERUNDEF pixels and convert the continents to ocean.  The tool refuses to do
-that unless --force is given, and refuses any fill covering more than
---max-fill-fraction of the raster.
+So each mismatched pixel is resolved by distance:
+
+  nearest wet LLC cell within --max-distance   -> assign that compact index
+  otherwise                                    -> reclassify to lake in the
+                                                  land raster
+
+Both rasters are written out, and CombineRasters then derives every area and
+fraction itself.  Neither input is modified.
 
 Usage
 -----
+    # cheap scan: what is in these rasters?
     fill_llc_raster.py --inspect \\
-        --llc-raster  raw.rst \\
-        --land-raster Pfafstetter.rst
+        --llc-raster raw.rst --land-raster Pfafstetter.rst \\
+        --valid-max 691200 --land-ocean 289836
 
+    # full decision pass, no files written
+    fill_llc_raster.py --dry-run \\
+        --llc-raster raw.rst --land-raster Pfafstetter.rst \\
+        --valid-max 691200 --land-ocean 289836 --land-lake 289837
+
+    # write both repaired rasters
     fill_llc_raster.py \\
-        --llc-raster  raw.rst \\
-        --land-raster Pfafstetter.rst \\
-        --output      filled.rst \\
-        --report      stats.txt
-
-Neither input is modified; the LLC raster is copied and the copy repaired.
+        --llc-raster raw.rst --land-raster Pfafstetter.rst \\
+        --llc-output llc_fixed.rst --land-output land_fixed.rst \\
+        --valid-max 691200 --land-ocean 289836 --land-lake 289837
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import sys
@@ -61,7 +71,6 @@ except ImportError:  # pragma: no cover
 
 NX_DEFAULT = 43200
 NY_DEFAULT = 21600
-RASTERUNDEF = -999
 
 
 class Raster:
@@ -145,9 +154,6 @@ class RowCache:
             self._rows.popitem(last=False)
         return row
 
-    def invalidate(self, j: int) -> None:
-        self._rows.pop(j, None)
-
 
 def valid_llc(row: "np.ndarray", valid_min: int, valid_max: int) -> "np.ndarray":
     """Boolean mask of raster values usable as LLC compact indices."""
@@ -159,16 +165,16 @@ def valid_llc(row: "np.ndarray", valid_min: int, valid_max: int) -> "np.ndarray"
 
 def scan(
     llc: Raster,
-    land: "Raster | None",
+    land: Raster,
     valid_min: int,
     valid_max: int,
     land_ocean: int,
     progress_every: int = 2000,
 ):
-    """Locate pixels that are undefined in the LLC raster and ocean in the land raster."""
+    """Locate pixels undefined in the LLC raster but marked ocean in the land raster."""
     targets = []
     n_target = 0
-    n_llc_undef = 0
+    n_undef = 0
     llc_markers: "Counter[int]" = Counter()
     land_values: "Counter[int]" = Counter()
     lo = hi = None
@@ -181,41 +187,33 @@ def scan(
 
         undefined = ~valid_llc(row, valid_min, valid_max)
         n_undef_row = int(undefined.sum())
-        n_llc_undef += n_undef_row
+        n_undef += n_undef_row
 
         if n_undef_row:
-            # Exact tallies, not a sample: np.unique over the masked row costs
-            # little and a truncated head-of-row sample is spatially biased
-            # toward one edge of the map, which misleads about proportions.
+            # Exact tallies, not a head-of-row sample: a truncated sample is
+            # spatially biased toward one edge of the map.
             values, counts = np.unique(row[undefined], return_counts=True)
             for value, count in zip(values.tolist(), counts.tolist()):
                 llc_markers[int(value)] += int(count)
 
-        if land is not None:
             land_row = land.read_row(j)
-            # Tally the land raster wherever the LLC raster is undefined, so
-            # the inspect report shows which land values coincide with gaps.
-            if n_undef_row:
-                values, counts = np.unique(land_row[undefined], return_counts=True)
-                for value, count in zip(values.tolist(), counts.tolist()):
-                    land_values[int(value)] += int(count)
-            hit = undefined & (land_row == land_ocean)
-        else:
-            hit = undefined
+            values, counts = np.unique(land_row[undefined], return_counts=True)
+            for value, count in zip(values.tolist(), counts.tolist()):
+                land_values[int(value)] += int(count)
 
-        idx = np.flatnonzero(hit)
-        if idx.size:
-            targets.append((j, idx))
-            n_target += int(idx.size)
+            idx = np.flatnonzero(undefined & (land_row == land_ocean))
+            if idx.size:
+                targets.append((j, idx))
+                n_target += int(idx.size)
 
         if progress_every and j and j % progress_every == 0:
             print(
                 f"  scanned row {j}/{llc.ny} "
-                f"(llc undefined {n_llc_undef}, repair targets {n_target})",
+                f"(llc undefined {n_undef}, mismatches {n_target})",
                 flush=True,
             )
 
-    return targets, n_target, n_llc_undef, lo, hi, llc_markers, land_values
+    return targets, n_target, n_undef, lo, hi, llc_markers, land_values
 
 
 def nearest_valid(
@@ -228,20 +226,20 @@ def nearest_valid(
     valid_min: int,
     valid_max: int,
     start_radius: int = 16,
-) -> int:
-    """Compact index of the nearest usable LLC pixel, searching outward from (j0, i0).
+):
+    """Return (compact_index, distance) of the nearest usable LLC pixel.
 
-    Scans a square window once per radius and doubles the radius on failure,
-    rather than restarting a growing scan at every integer radius -- the latter
-    costs O(R^3) element operations per pixel and is unusably slow at R=128.
+    Scans a square window once per radius and doubles on failure, rather than
+    restarting a growing scan at every integer radius -- the latter costs
+    O(R^3) element operations per pixel and is unusably slow at large R.
 
     A square of half-width R contains every pixel within Euclidean distance R,
-    but a candidate found in a corner may sit further than R, in which case a
-    nearer one could lie outside the square.  So the result is accepted only
-    once best_distance <= radius; otherwise the window grows again.
+    but a candidate found in a corner may lie further than R, in which case a
+    nearer one could sit outside the square.  The result is therefore accepted
+    only once best_distance <= radius.
 
-    Longitude wraps; latitude does not.  Returns 0 if nothing is found inside
-    max_radius, which the caller treats as a hard error.
+    Longitude wraps; latitude does not.  Returns (0, None) if nothing is found
+    within max_radius, which the caller resolves by reclassification.
     """
     half = nx // 2
     radius = max(1, start_radius)
@@ -269,66 +267,63 @@ def nearest_valid(
                 best_value = int(values[good[k]])
 
         if best_value and best_d2 <= radius * radius:
-            return best_value
+            return best_value, math.sqrt(best_d2)
         if radius >= max_radius:
-            # Accept a corner hit at the limit rather than failing outright.
-            return best_value
+            if best_value:
+                return best_value, math.sqrt(best_d2)
+            return 0, None
 
         radius = min(radius * 2, max_radius)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Fill LLC/Pfafstetter coastline mismatches in a GEOS raster.",
+        description="Reconcile the GEOS land mask with the MITgcm LLC ocean domain.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument("--llc-raster", required=True, help="raw .rst from mkMITAquaRaster.x")
-    ap.add_argument("--land-raster", help="Pfafstetter.rst -- required unless --force")
-    ap.add_argument("--output", help="repaired LLC .rst to write (omit with --inspect)")
+    ap.add_argument("--land-raster", required=True, help="Pfafstetter.rst")
+    ap.add_argument("--llc-output", help="repaired LLC raster to write")
+    ap.add_argument("--land-output", help="repaired land raster to write")
     ap.add_argument("--nx", type=int, default=NX_DEFAULT, help="raster width")
     ap.add_argument("--ny", type=int, default=NY_DEFAULT, help="raster height")
     ap.add_argument("--valid-min", type=int, default=1, help="lowest usable compact index")
     ap.add_argument("--valid-max", type=int, default=0, help="highest usable compact index (0 = none)")
-    ap.add_argument("--land-ocean", type=int, default=0, help="value marking ocean in the land raster")
-    ap.add_argument("--max-radius", type=int, default=128, help="search radius in pixels")
-    ap.add_argument("--report", default=None, help="write a per-cell gain report here")
-    ap.add_argument("--inspect", action="store_true", help="report and exit without writing")
+    ap.add_argument("--land-ocean", type=int, required=True, help="ocean marker in the land raster")
+    ap.add_argument("--land-lake", type=int, help="lake marker in the land raster")
+    ap.add_argument(
+        "--max-distance",
+        type=float,
+        default=32.0,
+        help="assign to ocean only within this many pixels; beyond it, reclassify to lake",
+    )
+    ap.add_argument("--max-radius", type=int, default=256, help="hard search limit in pixels")
+    ap.add_argument("--report", default=None, help="write a decision report here")
+    ap.add_argument("--inspect", action="store_true", help="cheap scan only, then exit")
+    ap.add_argument("--dry-run", action="store_true", help="decide everything but write nothing")
     ap.add_argument(
         "--max-fill-fraction",
         type=float,
         default=0.01,
-        help="refuse to fill more than this fraction of the raster",
-    )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="permit filling without a land raster, and past --max-fill-fraction",
+        help="refuse to act on more than this fraction of the raster",
     )
     args = ap.parse_args()
 
     for path in (args.llc_raster, args.land_raster):
-        if path and not os.path.isfile(path):
+        if not os.path.isfile(path):
             sys.exit(f"ERROR: raster not found: {path}")
-    if not args.inspect and not args.output:
-        sys.exit("ERROR: --output is required unless --inspect is given")
-    if not args.land_raster and not args.force:
-        sys.exit(
-            "ERROR: --land-raster is required.\n"
-            "  Without it every RASTERUNDEF pixel is a target -- about 20% of the\n"
-            "  raster, i.e. the whole land surface -- which would convert the\n"
-            "  continents to ocean.  Pass --force only if you truly mean that."
-        )
+
+    writing = not (args.inspect or args.dry_run)
+    if writing and not (args.llc_output and args.land_output):
+        sys.exit("ERROR: --llc-output and --land-output are required unless --inspect/--dry-run")
 
     llc = Raster(args.llc_raster, args.nx, args.ny)
+    land = Raster(args.land_raster, args.nx, args.ny)
     print(f"[fill_llc_raster] llc raster:  {args.llc_raster}")
     print(f"[fill_llc_raster]   layout:    {llc.describe()}")
-
-    land = None
-    if args.land_raster:
-        land = Raster(args.land_raster, args.nx, args.ny)
-        print(f"[fill_llc_raster] land raster: {args.land_raster}")
-        print(f"[fill_llc_raster]   layout:    {land.describe()}")
-        print(f"[fill_llc_raster]   ocean marker: {args.land_ocean}")
+    print(f"[fill_llc_raster] land raster: {args.land_raster}")
+    print(f"[fill_llc_raster]   layout:    {land.describe()}")
+    print(f"[fill_llc_raster]   ocean marker {args.land_ocean}, lake marker {args.land_lake}")
 
     bound = args.valid_max if args.valid_max > 0 else "unbounded"
     print(f"[fill_llc_raster] usable index range: {args.valid_min}..{bound}")
@@ -338,8 +333,7 @@ def main() -> int:
         llc, land, args.valid_min, args.valid_max, args.land_ocean
     )
     llc.close()
-    if land is not None:
-        land.close()
+    land.close()
 
     total_pixels = args.nx * args.ny
     print(f"[fill_llc_raster] llc value range: {lo} .. {hi}")
@@ -351,104 +345,146 @@ def main() -> int:
         seen = ", ".join(f"{v} (x{c})" for v, c in llc_markers.most_common(5))
         print(f"[fill_llc_raster]   markers: {seen}")
     if land_values:
-        print(f"[fill_llc_raster]   land raster values where llc is undefined ({len(land_values)} distinct):")
+        print(f"[fill_llc_raster]   land values where llc is undefined ({len(land_values)} distinct):")
         for value, count in land_values.most_common(12):
             share = 100.0 * count / max(n_undef, 1)
             print(f"[fill_llc_raster]     {value:>10d}  {count:>12d}  {share:6.2f}%")
-    print(f"[fill_llc_raster] repair targets (llc undefined AND land ocean): {n_target}")
+    print(f"[fill_llc_raster] mask mismatches (llc undefined AND land ocean): {n_target}")
 
     if args.inspect:
         if targets:
             j, columns = targets[0]
-            print(f"[fill_llc_raster] first target: row {j}, column {int(columns[0])}")
+            print(f"[fill_llc_raster] first mismatch: row {j}, column {int(columns[0])}")
         return 0
 
     if n_target == 0:
-        print("[fill_llc_raster] nothing to repair; copying unchanged")
-        shutil.copyfile(args.llc_raster, args.output)
+        print("[fill_llc_raster] nothing to reconcile")
+        if writing:
+            shutil.copyfile(args.llc_raster, args.llc_output)
+            shutil.copyfile(args.land_raster, args.land_output)
         return 0
 
     fraction = n_target / total_pixels
-    if fraction > args.max_fill_fraction and not args.force:
+    if fraction > args.max_fill_fraction:
         print(
-            f"ERROR: {n_target} targets is {100.0 * fraction:.2f}% of the raster, "
+            f"ERROR: {n_target} mismatches is {100.0 * fraction:.2f}% of the raster, "
             f"above --max-fill-fraction={100.0 * args.max_fill_fraction:.2f}%.\n"
             "  A genuine coastline mismatch is a few tens of thousands of pixels.\n"
-            "  Check --land-ocean is the right marker before overriding with --force.",
+            "  Check that --land-ocean is the right marker.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"[fill_llc_raster] copying to {args.output}")
-    shutil.copyfile(args.llc_raster, args.output)
-
-    # Read candidate values from the untouched original and write only to the
-    # copy.  Caching the destination instead would let a just-filled pixel act
-    # as a source for the next target, so values propagate in chains and the
-    # result depends on iteration order rather than on actual proximity.
+    # ---- decide everything before writing anything -------------------------
+    # An earlier version wrote rows as it went and then failed at the end,
+    # leaving a half-repaired raster on disk.  Decisions are cheap to hold in
+    # memory for a few tens of thousands of pixels, so resolve first.
     src = Raster(args.llc_raster, args.nx, args.ny)
-    dst = Raster(args.output, args.nx, args.ny, mode="r+b")
     cache = RowCache(src)
 
+    assign: "dict[int, list[tuple[int, int]]]" = {}
+    reclass: "dict[int, list[int]]" = {}
     gained: "Counter[int]" = Counter()
-    unresolved = []
-    filled = 0
+    distances: "Counter[int]" = Counter()
+    n_assigned = 0
+    n_reclass = 0
 
     done = 0
     report_every = max(1, n_target // 20)
     started = time.time()
 
     for j, columns in targets:
-        row = src.read_row(j)
         for i in columns.tolist():
-            value = nearest_valid(
+            value, distance = nearest_valid(
                 cache, args.nx, args.ny, j, int(i),
                 args.max_radius, args.valid_min, args.valid_max,
             )
-            if value == 0:
-                unresolved.append((j, int(i)))
-            else:
-                row[i] = value
+            if value and distance is not None and distance <= args.max_distance:
+                assign.setdefault(j, []).append((int(i), value))
                 gained[value] += 1
-                filled += 1
+                distances[int(distance)] += 1
+                n_assigned += 1
+            else:
+                reclass.setdefault(j, []).append(int(i))
+                n_reclass += 1
+
             done += 1
             if done % report_every == 0:
                 elapsed = time.time() - started
                 rate = done / elapsed if elapsed > 0 else 0.0
                 print(
-                    f"  filled {done}/{n_target} ({100.0 * done / n_target:.0f}%, "
+                    f"  resolved {done}/{n_target} ({100.0 * done / n_target:.0f}%, "
                     f"{rate:.0f} px/s)",
                     flush=True,
                 )
-        dst.write_row(j, row)
 
     src.close()
-    dst.close()
 
-    print(f"[fill_llc_raster] filled {filled} pixels across {len(gained)} LLC cells")
+    print(f"[fill_llc_raster] assigned to a nearby LLC cell: {n_assigned} "
+          f"(within {args.max_distance:g} px)")
+    print(f"[fill_llc_raster] reclassified to lake:          {n_reclass}")
     if gained:
         index, count = gained.most_common(1)[0]
-        print(f"[fill_llc_raster] largest single-cell gain: {count} pixels (compact index {index})")
+        print(f"[fill_llc_raster] receiving cells: {len(gained)}, "
+              f"largest gain {count} pixels (compact index {index})")
 
-    if unresolved:
+    if n_reclass and not args.land_lake:
         print(
-            f"ERROR: {len(unresolved)} pixels found no valid neighbour within "
-            f"{args.max_radius} pixels; first few: {unresolved[:5]}",
+            f"ERROR: {n_reclass} pixels are further than {args.max_distance:g} px from any\n"
+            "  wet LLC cell and must be reclassified, but --land-lake was not given.\n"
+            "  Find the lake placeholder record in Pfafstetter.til:\n"
+            "    awk 'NR > 5 && $1 == 19 {print NR - 5; exit}' Pfafstetter.til",
             file=sys.stderr,
         )
         return 1
 
     if args.report:
         with open(args.report, "w") as fh:
-            fh.write(f"llc undefined pixels: {n_undef}\n")
-            fh.write(f"repair targets:       {n_target}\n")
-            fh.write(f"filled pixels:        {filled}\n")
-            fh.write(f"receiving cells:      {len(gained)}\n\n")
-            fh.write("compact_index  pixels_gained\n")
+            fh.write(f"llc undefined pixels:  {n_undef}\n")
+            fh.write(f"mask mismatches:       {n_target}\n")
+            fh.write(f"assigned to ocean:     {n_assigned}\n")
+            fh.write(f"reclassified to lake:  {n_reclass}\n")
+            fh.write(f"max-distance:          {args.max_distance}\n\n")
+            fh.write("distance_px  pixels_assigned\n")
+            for distance, count in sorted(distances.items()):
+                fh.write(f"{distance:11d}  {count:d}\n")
+            fh.write("\ncompact_index  pixels_gained\n")
             for index, count in gained.most_common():
                 fh.write(f"{index:13d}  {count:d}\n")
         print(f"[fill_llc_raster] report: {args.report}")
 
+    if args.dry_run:
+        print("[fill_llc_raster] dry run; nothing written")
+        return 0
+
+    # ---- write -------------------------------------------------------------
+    print(f"[fill_llc_raster] writing {args.llc_output}")
+    shutil.copyfile(args.llc_raster, args.llc_output)
+    print(f"[fill_llc_raster] writing {args.land_output}")
+    shutil.copyfile(args.land_raster, args.land_output)
+
+    llc_src = Raster(args.llc_raster, args.nx, args.ny)
+    llc_dst = Raster(args.llc_output, args.nx, args.ny, mode="r+b")
+    for j, items in assign.items():
+        row = llc_src.read_row(j)
+        for i, value in items:
+            row[i] = value
+        llc_dst.write_row(j, row)
+    llc_src.close()
+    llc_dst.close()
+
+    if reclass:
+        land_src = Raster(args.land_raster, args.nx, args.ny)
+        land_dst = Raster(args.land_output, args.nx, args.ny, mode="r+b")
+        for j, columns in reclass.items():
+            row = land_src.read_row(j)
+            for i in columns:
+                row[i] = args.land_lake
+            land_dst.write_row(j, row)
+        land_src.close()
+        land_dst.close()
+
+    print("[fill_llc_raster] done")
     return 0
 
 

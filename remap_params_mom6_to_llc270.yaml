@@ -1,0 +1,114 @@
+#
+# remap_restarts config: GEOS v12 C180/91L MOM6+CICE4  ->  MITgcm LLC270 tile space
+#
+# Remaps the 6 tile-space restarts that remap_restarts.py handles:
+#     catch_internal_rst        lake_internal_rst        landice_internal_rst
+#     openwater_internal_rst    seaicethermo_internal_rst  saltwater_import_rst
+#
+# Upper air is NOT remapped here (air.remap: false) - those 25 files are a
+# straight copy at identical c180/91L and were staged separately.
+#
+# seaice_import_rst is NOT handled by this package (absent from find_rst() in
+# remap_other_restarts.py); it is on the ocean grid, take it from v11.7 MIT.
+#
+# NOTE ON ogrid/omodel BELOW: the output side deliberately says MOM6/1440x1080
+# even though the target is MITgcm LLC270. Those two fields never enter the
+# remap math - they only resolve a BCS land directory whose sole use is reading
+# clsm/catchment.def to size the SLURM job (remap_catchANDcn.py:116,
+# remap_other_restarts.py:133). The real target geometry is supplied by
+# output:surface:catch_tilefile, which overrides tile lookup for BOTH the
+# catchment path and the lake/landice/saltwater path
+# (remap_other_restarts.py:63,82). Setting omodel to a MIT value is not
+# possible anyway - choices are data/MOM5/MOM6 only.
+#
+
+input:
+  air:
+    drymass: 1
+    hydrostatic: true
+  shared:
+    MERRA-2: false
+    GEOS-IT: false
+    stretch: false
+    omodel: MOM6
+    agrid: C180
+    bc_base: /discover/nobackup/projects/gmao/bcs_shared/fvInput/ExtData/esm/tiles
+    bc_version: NL3
+    expid: ''
+    ogrid: 1440x1080
+    rst_dir: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/GEOS_MOM
+    yyyymmddhh: '2013020121'
+  surface:
+    # true = input saltwater is ALREADY split into openwater + seaicethermo.
+    # Yours is (no saltwater_internal_rst present), and NL3 implies true anyway.
+    split_saltwater: true
+    zoom: '2'
+    # !! VERIFY - see notes at bottom of file
+    wemin: '13'
+    catch_model: catch
+    catch_tilefile: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/tile_MOM.data
+
+output:
+  shared:
+    label: false
+    stretch: false
+    # see NOTE ON ogrid/omodel above - intentionally MOM6, not MIT
+    omodel: MOM6
+    agrid: C180
+    bc_base: /discover/nobackup/projects/gmao/bcs_shared/fvInput/ExtData/esm/tiles
+    bc_version: NL3
+    expid: ''
+    ogrid: 1440x1080
+    out_dir: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/GEOS_MIT
+  air:
+    # upper air already staged by straight copy - do not redo
+    remap: false
+    nlevel: '91'
+    agcm_import_rst: false
+  surface:
+    split_saltwater: true
+    surflay: 50.
+    # !! VERIFY - see notes at bottom of file
+    wemin: '13'
+    remap_water: true
+    remap_catch: true
+    # THE TARGET GEOMETRY - this is what actually drives the remap
+    catch_tilefile: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/tile_target.data
+    EASE_grid: null
+  analysis:
+    bkg: false
+    aqua: false
+    lcv: false
+
+slurm_pbs:
+  account: s2826
+  qos: ''
+  partition: ''
+  reservation: ''
+
+# ---------------------------------------------------------------------------
+# BEFORE RUNNING - two values I assumed rather than knew:
+#
+#   wemin (both sides)  assumed 13, the usual NL3 value. Confirm with:
+#       grep -i wemin /path/to/G12_t3_MOM6C4/AGCM.rc
+#       grep -i wemin /path/to/G12_t3_MOM6C4/gcm_run.j
+#   A wrong WEMIN silently corrupts snow water equivalent in catch/landice.
+#
+#   bc_version NL3 and the bc_base path. Confirm the MOM6 experiment used
+#   these; if its linkbcs points elsewhere, change both input and output.
+#
+# HOW TO RUN
+#
+#   source $GEOSBIN/g5_modules            # csh
+#   $GEOSBIN/remap_restarts.py config_file -c remap_params_mom6_to_llc270.yaml
+#
+# Run the two subsets separately if you want to isolate failures:
+#   $GEOSBIN/remap_catchANDcn.py          # catch_internal only
+#   $GEOSBIN/remap_other_restarts.py      # lake/landice/openwater/seaicethermo/saltwater_import
+# Both read remap_params.yaml from the working directory, so copy this file
+# to that name first.
+#
+# EXPECTED RESULT - check the new tile dimensions differ from the input:
+#   ncdump -h $OUT/catch_internal_rst*      | grep 'tile ='   # was 684752
+#   ncdump -h $OUT/openwater_internal_rst*  | grep 'tile ='   # was 1893385, expect ~1.28M
+# ---------------------------------------------------------------------------

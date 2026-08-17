@@ -1,0 +1,23 @@
+--- GEOS_OgcmGridComp_v12.F90	2026-08-13 13:43:14.128745835 -0400
++++ /tmp/patched.F90	2026-08-13 18:25:26.309011344 -0400
+@@ -852,7 +852,19 @@
+      if(DO_DATA_ATM4OCN) then
+        call MAPL_TerminateImport(GC, ['DATA_UW  ', 'DATA_VW  ', 'DISCHARGE', 'CALVING  '], [OCEAN, OCEAN, OCEAN, OCEAN], _RC)
+     else
+-       call MAPL_TerminateImport(GC, ['DATA_UW', 'DATA_VW'], [OCEAN, OCEAN], _RC)
++       if (trim(OCEAN_NAME) == "MIT") then
++          ! MITgcm has no calving plug: MIT_GEOS5PlugMod never declares a
++          ! CALVING import, and GEOS v11.7 had no CALVING field anywhere.
++          ! GEOS_OceanGridComp still declares CALVING as its OWN import
++          ! (read at its line 564), so unless it is terminated here it
++          ! propagates up and fails in GCMSetServices with
++          !   "SRC_NAME: <CALVING> DST_NAME: <CALVING> is not satisfied"
++          ! Same class of fix as the UWC/VWC guard above.
++          call MAPL_TerminateImport(GC, ['DATA_UW  ', 'DATA_VW  ', 'CALVING  '], &
++                                        [OCEAN, OCEAN, OCEAN], _RC)
++       else
++          call MAPL_TerminateImport(GC, ['DATA_UW', 'DATA_VW'], [OCEAN, OCEAN], _RC)
++       endif
+     endif
+   endif
+ 

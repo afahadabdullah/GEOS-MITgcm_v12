@@ -1,0 +1,128 @@
+#
+# remap_restarts config: GEOS v11.7 MIT LLC270  ->  GEOS v12 MIT LLC270 tile space
+#
+# Purpose: re-source the three OCEAN-TILE restarts from the v11.7 MIT run
+# instead of the v12 MOM6 run.
+#
+#   openwater_internal_rst   saltwater_import_rst   seaicethermo_internal_rst
+#
+# WHY: both ends sit on the SAME LLC270 ocean grid, so only the v11.7->v12
+# land-mask change moves tiles:
+#
+#     from v12 MOM6   1,893,385 -> 1,283,002   (32% change, tripolar -> LLC)
+#     from v11.7 MIT  1,279,740 -> 1,283,002   (0.25% change, LLC -> LLC)
+#
+# ~99.75% of tiles map one-to-one here. The MOM6 route rebuilt every CICE4
+# column by spatial search off an unrelated grid, which is the step most
+# likely to yield thermodynamically inconsistent ice.
+#
+# NOT sourced from v11.7 (leave these as already staged):
+#   catch_internal    copy from v12 MOM6 - land is 684,752 on BOTH tile files
+#   landice_internal  copy from v12 MOM6 - 6,836 on both
+#   lake_internal     v12 MOM6 remap - genuinely +4 tiles from reconciliation
+#   seaice_import     straight copy from v11.7 - ocean GRID (23040x30), not
+#                     tile space, and identical between v11.7 and v12
+#   upper air (25)    v12 MOM6, already copied
+#
+# remap_catch is FALSE here - v11.7 land geometry is wrong for v12
+# (686,448 land tiles vs 684,752). Only the water path runs.
+#
+# INPUT rst_dir must contain ONLY the three files above. find_rst() globs by
+# name, so a full v11.7 restart directory would also pull in lake/landice and
+# clobber the correctly-sourced v12 versions.
+#
+
+input:
+  air:
+    drymass: 1
+    hydrostatic: true
+  shared:
+    MERRA-2: false
+    GEOS-IT: false
+    stretch: false
+    omodel: MOM6
+    agrid: C180
+    # !! SET ME - the v11.7 BCS tree. Only used for the NPE/walltime lookup and
+    # the split_saltwater test; the real geometry comes from catch_tilefile.
+    # Must NOT contain 'GM4' or 'Ganymed' or split_saltwater flips to false.
+    bc_base: /discover/nobackup/projects/gmao/geos_itv/skhani/Ocean_Bathymetry/NEW_LAND_BC_TEST
+    bc_version: v13
+    expid: ''
+    ogrid: 1440x1080
+    rst_dir: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/V117_ICE_IN
+    yyyymmddhh: '2013020121'
+  surface:
+    split_saltwater: true
+    zoom: '2'
+    wemin: '13'
+    catch_model: catch
+    # v11.7 LLC270 tile file: 686,448 land / 1,279,740 ocean / 563,995 wet cells
+    # Verified against tile_target.data: 1,678 cells newly wet in v12, 0 dropped.
+    # v11.7 ocean domain is a strict SUBSET of v12 - the remap is purely additive.
+    catch_tilefile: /gpfsm/dnb10/projects/p118/afahad/GEOSMITgcmfiles/CF0180x6C_LL23040xLL0030-Pfafstetter.til
+
+output:
+  shared:
+    label: false
+    stretch: false
+    omodel: MOM6
+    agrid: C180
+    bc_base: /discover/nobackup/projects/gmao/geos_itv/skhani/Ocean_Bathymetry/NEW_LAND_BC_TEST
+    bc_version: v13
+    expid: ''
+    ogrid: 1440x1080
+    # separate dir so a bad run cannot clobber the good v12-sourced files
+    out_dir: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/GEOS_MIT_ICE
+  air:
+    remap: false
+    nlevel: '91'
+    agcm_import_rst: false
+  surface:
+    split_saltwater: true
+    surflay: 50.
+    wemin: '13'
+    remap_water: true
+    # v11.7 land geometry is wrong for v12 - do not touch catch
+    remap_catch: false
+    catch_tilefile: /gpfsm/dnb10/projects/p118/afahad/g12exp/G12_t4_MITC4/restarts/tile_target.data
+    EASE_grid: null
+  analysis:
+    bkg: false
+    aqua: false
+    lcv: false
+
+slurm_pbs:
+  account: s2826
+  qos: ''
+  partition: ''
+  reservation: ''
+
+# ---------------------------------------------------------------------------
+# BEFORE RUNNING
+#
+#   1. Stage ONLY the three files:
+#        mkdir -p $STAGE
+#        cp -av $V117/{openwater_internal,saltwater_import,seaicethermo_internal}_rst $STAGE/
+#
+#   2. Fill in input:surface:catch_tilefile with the v11.7 LLC270 .til.
+#      Sanity check it first - these must match the v11.7 restarts:
+#        awk '$1==0'   v117.til | wc -l     # expect 1279740
+#        awk '$1==100' v117.til | wc -l     # expect  686448
+#
+#   3. Diff the variable lists v11.7 vs v12 for the three components. Any
+#      field v12 expects that v11.7 lacks will fail at model init.
+#
+#   4. Confirm the v11.7 WEMIN. If the v11.7 experiment used a different
+#      value than v12, set input:surface:wemin accordingly - a mismatch
+#      silently rewrites snow water equivalent.
+#
+# RUN (needs >=80 cores; on 1 core srun cannot create steps)
+#   source $GEOSBIN/g5_modules
+#   $GEOSBIN/remap_restarts.py config_file -c remap_params_v117ice_to_llc270.yaml
+#
+# VERIFY - all three must report tile = 1283002
+#   for f in $OUT/*_rst.20130201_21z.nc4; do
+#     echo -n "$f "; ncdump -h $f | grep 'tile ='; done
+#
+# THEN promote over the MOM6-sourced versions in GEOS_MIT/.
+# ---------------------------------------------------------------------------

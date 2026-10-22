@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="115" viewBox="0 0 880 115" role="img" aria-labelledby="title desc">
-<title id="title">Colored tcsh commands, block 8</title>
-<desc id="desc">Commands are cyan, copy commands green, options yellow, variables purple, and strings blue. Expand the Copy commands block below this preview for executable text.</desc>
-<rect x=".5" y=".5" width="879" height="114" rx="12" fill="#111f2c" stroke="#314859"/>
-<text x="24" y="29" fill="#b0c4d3" font-family="sans-serif" font-size="12" letter-spacing="1">TCSH / CSH</text>
-<text x="856" y="29" text-anchor="end" fill="#b0c4d3" font-family="sans-serif" font-size="12">Expand Copy commands below</text>
-<path d="M1 43 H879" stroke="#314859"/>
-<text x="24" y="68" xml:space="preserve" fill="#e5edf5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15"><tspan fill="#67e8f9">make</tspan><tspan fill="#e5edf5"> </tspan><tspan fill="#fcd34d">-j</tspan><tspan fill="#e5edf5"> 12 install</tspan></text>
-<text x="24" y="100" fill="#b0c4d3" font-family="sans-serif" font-size="11">Long lines wrap in this preview. The copyable commands keep their original line breaks.</text></svg>

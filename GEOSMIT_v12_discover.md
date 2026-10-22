@@ -75,6 +75,9 @@ Copy the supplied configuration and modified source files **before configuring o
 \cp "$geos_files/GEOS_OgcmGridComp.F90" \
   "$geos_root/src/Components/@GEOSgcm_GridComp/GEOSogcm_GridComp/GEOS_OgcmGridComp.F90"
 
+\cp "$geos_files/GEOS_OceanGridComp.F90" \
+  "$geos_root/src/Components/@GEOSgcm_GridComp/GEOSogcm_GridComp/@GEOS_OceanGridComp/GEOS_OceanGridComp.F90"
+
 \cp "$geos_files/gc2gc.F90" \
   "$geos_root/src/Components/@GEOSgcm_GridComp/gc2gc.F90"
 

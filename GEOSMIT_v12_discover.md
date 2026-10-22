@@ -15,9 +15,16 @@ These instructions use **tcsh/csh on NCCS Discover** and the following configura
 
 Run each step only after the previous step succeeds. The commands below start with a new `GEOSgcm` directory. If that directory already exists, preserve it under another name before cloning.
 
+**Command colors:** cyan commands, green copy commands, yellow options, purple variables, and blue strings. Expand **Copy commands (tcsh/csh)** below each preview to use GitHub's Copy button.
+
 ## 1. Load the tools and clone GEOSgcm
 
 Run on a Discover login node with internet access:
+
+![Syntax-colored command preview 1](docs/assets/geosmit-v12-discover/commands-01.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 module use -a /discover/swdev/gmao_SIteam/modulefiles-SLES15
@@ -33,15 +40,24 @@ set geos_root = "$cwd"
 git remote -v
 ```
 
+</details>
+
 Confirm that `origin` uses `https://github.com/GEOS-ESM/GEOSgcm.git`.
 
 ## 2. Clone the component repositories
+
+![Syntax-colored command preview 2](docs/assets/geosmit-v12-discover/commands-02.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 mepo config set clone.partial blobless
 env PYTHONUNBUFFERED=1 GIT_TRACE="$geos_root/mepo-clone.trace" mepo clone
 mepo status
 ```
+
+</details>
 
 Wait for `mepo clone` to finish before running `mepo status`. Tagged components normally appear with `(DH)`, meaning detached HEAD. The untracked `mepo-clone.trace` file is a diagnostic log.
 
@@ -51,20 +67,39 @@ If cloning fails, resolve that failure before continuing. A partially cloned com
 
 Switch only the application repository to the updated MIT setup branch:
 
+![Syntax-colored command preview 3](docs/assets/geosmit-v12-discover/commands-03.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
+
 ```tcsh
 cd "$geos_root/src/Applications/@GEOSgcm_App"
 git checkout feature/update-mit-setup
 cd "$geos_root"
 ```
 
+</details>
+
 Define the custom-file location and MIT plugin directory:
+
+![Syntax-colored command preview 4](docs/assets/geosmit-v12-discover/commands-04.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 set geos_files = "/gpfsm/dnb10/projects/p118/afahad/GEOSv12/files"
 set mit_plugin = "$geos_root/src/Components/@GEOSgcm_GridComp/GEOSogcm_GridComp/@GEOS_OceanGridComp/MIT_GEOS5PlugMod"
 ```
 
+</details>
+
 Copy the supplied configuration and modified source files **before configuring or building**:
+
+![Syntax-colored command preview 5](docs/assets/geosmit-v12-discover/commands-05.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 \cp -R "$geos_files/c180_llc270_01" "$mit_plugin/configs/"
@@ -82,6 +117,8 @@ Copy the supplied configuration and modified source files **before configuring o
 chmod u+x "$mit_plugin/@mit/tools/xmakedepend"
 ```
 
+</details>
+
 Confirm that the supplied `configs/c180_llc270_01/code/SIZE.h` uses the intended dimensions:
 
 ```text
@@ -94,6 +131,11 @@ Nr  = 50
 ## 4. Configure and build on a compute node
 
 Continue in an allocated Discover compute-node session. Re-establish the paths and load the compiler, MPI, and Baselibs environment in that session:
+
+![Syntax-colored command preview 6](docs/assets/geosmit-v12-discover/commands-06.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 module use -a /discover/swdev/gmao_SIteam/modulefiles-SLES15
@@ -109,9 +151,16 @@ which ifort icc mpif90
 printenv BASEDIR BASELIBS MPIHOME
 ```
 
+</details>
+
 Check that the required compilers and library paths are available. If a compiler or a path required by the supplied `build_options.intel` is missing, resolve the environment before building.
 
 Configure a new build directory:
+
+![Syntax-colored command preview 7](docs/assets/geosmit-v12-discover/commands-07.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 mkdir -p "$geos_root/build"
@@ -125,18 +174,34 @@ cmake .. \
   -DCMAKE_Fortran_COMPILER=ifort
 ```
 
+</details>
+
 After CMake completes successfully, compile and install using an allocation with at least 12 CPUs:
+
+![Syntax-colored command preview 8](docs/assets/geosmit-v12-discover/commands-08.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 make -j 12 install
 ```
 
+</details>
+
 Verify the selected configuration and installed executable:
+
+![Syntax-colored command preview 9](docs/assets/geosmit-v12-discover/commands-09.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
 
 ```tcsh
 grep -E '^(BUILD_MIT_OCEAN|MIT_CONFIG_ID):' CMakeCache.txt
 ls -lh "$geos_root/install/bin/GEOSgcm.x"
 ```
+
+</details>
 
 The cache should report `BUILD_MIT_OCEAN=ON` and `MIT_CONFIG_ID=c180_llc270_01`.
 
@@ -144,10 +209,17 @@ The cache should report `BUILD_MIT_OCEAN=ON` and `MIT_CONFIG_ID=c180_llc270_01`.
 
 Run the installed setup script:
 
+![Syntax-colored command preview 10](docs/assets/geosmit-v12-discover/commands-10.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
+
 ```tcsh
 cd "$geos_root/install/bin"
 ./gcm_setup
 ```
+
+</details>
 
 Use the following answers for the example experiment. **Enter** means accept the displayed default; confirm that it matches the value shown here.
 
@@ -186,6 +258,11 @@ Wait for setup to report `Done!` and confirm that `GEOSgcm.x` has been copied in
 
 ## 6. Stage the supplied resources and initial conditions
 
+![Syntax-colored command preview 11](docs/assets/geosmit-v12-discover/commands-11.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
+
 ```tcsh
 cd /discover/nobackup/projects/GEOS_MITgcm/afahad/g12exp/test_GEOSMITv12
 set geos_files = "/gpfsm/dnb10/projects/p118/afahad/GEOSv12/files"
@@ -199,6 +276,8 @@ if ( -e linkbcs ) \cp -p linkbcs linkbcs.setup-original
 \cp "$geos_files"/GEOS_IC/* .
 ```
 
+</details>
+
 Confirm that these supplied resources and initial conditions match C180, LLC270, 91 atmosphere levels, 50 ocean levels, and CICE4. The supplied `AGCM.rc` replaces the generated settings, so verify its processor layout and physics selections before launching.
 
 For this configuration, the expected atmosphere layout is `NX=8`, `NY=96`; the ocean layout is `768 × 1`. Both correspond to 768 model MPI ranks. Account for any additional IOSERVER ranks in the generated job script rather than assuming the total allocation is exactly 768.
@@ -207,9 +286,16 @@ For this configuration, the expected atmosphere layout is `NX=8`, `NY=96`; the o
 
 Review `gcm_run.j` for the intended project account, processor constraint, processor count, walltime, and experiment paths. Then submit:
 
+![Syntax-colored command preview 12](docs/assets/geosmit-v12-discover/commands-12.svg)
+
+<details>
+<summary>Copy commands (tcsh/csh)</summary>
+
 ```tcsh
 sbatch gcm_run.j
 squeue -u "$USER"
 ```
+
+</details>
 
 Inspect the job output and model logs after startup to confirm that the executable, resources, boundary conditions, and initial conditions were loaded successfully.

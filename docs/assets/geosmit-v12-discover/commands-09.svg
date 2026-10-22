@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="138" viewBox="0 0 880 138" role="img" aria-labelledby="title desc">
+<title id="title">Colored tcsh commands, block 9</title>
+<desc id="desc">Commands are cyan, copy commands green, options yellow, variables purple, and strings blue. Expand the Copy commands block below this preview for executable text.</desc>
+<rect x=".5" y=".5" width="879" height="137" rx="12" fill="#111f2c" stroke="#314859"/>
+<text x="24" y="29" fill="#b0c4d3" font-family="sans-serif" font-size="12" letter-spacing="1">TCSH / CSH</text>
+<text x="856" y="29" text-anchor="end" fill="#b0c4d3" font-family="sans-serif" font-size="12">Expand Copy commands below</text>
+<path d="M1 43 H879" stroke="#314859"/>
+<text x="24" y="68" xml:space="preserve" fill="#e5edf5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15"><tspan fill="#67e8f9">grep</tspan><tspan fill="#e5edf5"> </tspan><tspan fill="#fcd34d">-E</tspan><tspan fill="#e5edf5"> </tspan><tspan fill="#93c5fd">&#x27;^(BUILD_MIT_OCEAN|MIT_CONFIG_ID):&#x27;</tspan><tspan fill="#e5edf5"> CMakeCache.txt</tspan></text>
+<text x="24" y="91" xml:space="preserve" fill="#e5edf5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15"><tspan fill="#67e8f9">ls</tspan><tspan fill="#e5edf5"> </tspan><tspan fill="#fcd34d">-lh</tspan><tspan fill="#e5edf5"> </tspan><tspan fill="#93c5fd">&quot;</tspan><tspan fill="#d8b4fe">$geos_root</tspan><tspan fill="#93c5fd">/install/bin/GEOSgcm.x&quot;</tspan></text>
+<text x="24" y="123" fill="#b0c4d3" font-family="sans-serif" font-size="11">Long lines wrap in this preview. The copyable commands keep their original line breaks.</text></svg>
